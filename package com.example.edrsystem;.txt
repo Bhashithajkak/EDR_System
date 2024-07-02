@@ -1,0 +1,457 @@
+package com.example.edrsystem;
+
+import java.io.*;
+import java.nio.file.*;
+import java.nio.file.attribute.*;
+import java.security.*;
+import java.time.*;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.logging.*;
+
+import com.google.common.util.concurrent.RateLimiter;
+
+public class FileMonitor {
+    private final WatchService watchService;
+    private final Map<WatchKey, Path> keys;
+    private final boolean recursive;
+    private final MessageDigest md;
+    private final Map<Path, FileState> fileStates;
+    private final Set<String> knownMalwareHashes;
+    private final boolean isPosixFileSystem;
+    private final ExecutorService executorService;
+    private static final Logger logger = Logger.getLogger(FileMonitor.class.getName());
+
+    private final Set<String> whitelistedDirectories;
+    private final Set<String> whitelistedProcesses;
+    private final Map<Path, Integer> suspicionScores;
+
+    private static final int THREAD_POOL_SIZE = 10;
+    private static final int MAX_FILE_SIZE_MB = 100;
+
+    private final VirusTotalClient virusTotalClient;
+    private final RateLimiter rateLimiter;
+    private final ExpiringCache<String, Boolean> hashCache;
+
+    private static class FileState {
+        String hash;
+        long lastModified;
+        long size;
+        Set<PosixFilePermission> posixPermissions;
+        boolean isReadOnly;
+        long timestamp;
+
+        FileState(String hash, long lastModified, long size, Set<PosixFilePermission> posixPermissions, boolean isReadOnly) {
+            this.hash = hash;
+            this.lastModified = lastModified;
+            this.size = size;
+            this.posixPermissions = posixPermissions;
+            this.isReadOnly = isReadOnly;
+            this.timestamp = System.currentTimeMillis();
+        }
+    }
+
+    public FileMonitor() throws IOException, NoSuchAlgorithmException {
+        this.watchService = FileSystems.getDefault().newWatchService();
+        this.keys = new ConcurrentHashMap<>();
+        this.recursive = true;
+        this.md = MessageDigest.getInstance("SHA-256");
+        this.fileStates = new ConcurrentHashMap<>();
+        this.knownMalwareHashes = loadKnownMalwareHashes();
+        this.isPosixFileSystem = FileSystems.getDefault().supportedFileAttributeViews().contains("posix");
+        this.executorService = Executors.newFixedThreadPool(THREAD_POOL_SIZE);
+        this.whitelistedDirectories = loadWhitelistedDirectories();
+        this.whitelistedProcesses = loadWhitelistedProcesses();
+        this.suspicionScores = new ConcurrentHashMap<>();
+
+        this.virusTotalClient = new VirusTotalClient("ec5215b7e247f59169e4778e6105156b478885e9ce948ae65ed1ffdc8a5d14de");
+        this.rateLimiter = RateLimiter.create(4.0 / 60.0); // 4 requests per minute
+        this.hashCache = new ExpiringCache<>(3600000); // 1 hour expiration
+
+        configureLogger();
+    }
+
+    private void configureLogger() {
+        try {
+            FileHandler fileHandler = new FileHandler("edr_system.log", true);
+            SimpleFormatter formatter = new SimpleFormatter();
+            fileHandler.setFormatter(formatter);
+            logger.addHandler(fileHandler);
+            logger.setLevel(Level.ALL);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private Set<String> loadKnownMalwareHashes() {
+        // TODO: Implement loading of known malware hashes from a secure database
+        return new HashSet<>();
+    }
+
+    private Set<String> loadWhitelistedDirectories() {
+        Set<String> directories = new HashSet<>();
+//        directories.add("C:\\Windows\\");
+//        directories.add("C:\\Program Files\\");
+//        directories.add("C:\\Program Files (x86)\\");
+//        directories.add("C:\\Users\\DELL\\AppData\\Local\\");
+//        directories.add("C:\\ProgramData\\");
+//        directories.add("D:\\mongodb\\");
+        // Add more trusted directories as needed
+        directories.add("C:\\");
+        directories.add("E:\\");
+        directories.add("F:\\");
+        directories.add("D:\\anaconda3\\");
+        return directories;
+    }
+
+    private Set<String> loadWhitelistedProcesses() {
+        Set<String> processes = new HashSet<>();
+        processes.add("svchost.exe");
+        processes.add("explorer.exe");
+        processes.add("chrome.exe");
+        processes.add("msedge.exe");
+        processes.add("mongod.exe");
+        // Add more trusted processes as needed
+        return processes;
+    }
+
+    private void registerAll(final Path start) throws IOException {
+        Files.walkFileTree(start, new SimpleFileVisitor<Path>() {
+            @Override
+            public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) throws IOException {
+                if (dir.getFileName() == null) {
+                    // This is likely a root directory, register it directly
+                    registerDirectory(dir);
+                    return FileVisitResult.CONTINUE;
+                }
+                if (isWhitelisted(dir)) {
+                    logger.info("Skipping whitelisted directory: " + dir);
+                    return FileVisitResult.SKIP_SUBTREE;
+                }
+                registerDirectory(dir);
+                logger.info("Successfully registered all directory: " + dir);
+                return FileVisitResult.CONTINUE;
+            }
+        });
+    }
+
+    private void registerDirectory(Path dir) throws IOException {
+        WatchKey key = dir.register(watchService,
+                StandardWatchEventKinds.ENTRY_CREATE,
+                StandardWatchEventKinds.ENTRY_MODIFY,
+                StandardWatchEventKinds.ENTRY_DELETE);
+        keys.put(key, dir);
+    }
+
+    private String calculateHash(Path file) {
+        try {
+            if (Files.size(file) > MAX_FILE_SIZE_MB * 1024 * 1024) {
+                logger.warning("File too large to hash: " + file);
+                return "";
+            }
+            byte[] hash = md.digest(Files.readAllBytes(file));
+            StringBuilder hexString = new StringBuilder();
+            for (byte b : hash) {
+                String hex = Integer.toHexString(0xff & b);
+                if (hex.length() == 1) hexString.append('0');
+                hexString.append(hex);
+            }
+            return hexString.toString();
+        } catch (IOException e) {
+            logger.severe("Error calculating hash for file: " + file);
+            return "";
+        }
+    }
+
+    private void handleFileEvent(Path file, String eventType) {
+        if (isWhitelisted(file) || isCommonDataFile(file)) {
+            logger.fine("Whitelisted or common data file event: " + file);
+            return;
+        }
+
+        executorService.submit(() -> {
+            try {
+                if (!Files.isRegularFile(file)) return;
+
+                String hash = calculateHash(file);
+                long lastModified = Files.getLastModifiedTime(file).toMillis();
+                long size = Files.size(file);
+                Set<PosixFilePermission> posixPermissions = null;
+                boolean isReadOnly = false;
+
+                if (isPosixFileSystem) {
+                    posixPermissions = Files.getPosixFilePermissions(file);
+                } else {
+                    isReadOnly = !Files.isWritable(file);
+                }
+
+                FileState previousState = fileStates.get(file);
+                FileState currentState = new FileState(hash, lastModified, size, posixPermissions, isReadOnly);
+
+                if (previousState == null) {
+                    logger.info(String.format("%s: %s (Hash: %s)", eventType, file, hash));
+                    fileStates.put(file, currentState);
+                    checkForSharingOrExecution(file, posixPermissions, isReadOnly);
+                } else {
+                    if (!previousState.hash.equals(currentState.hash)) {
+                        logger.info(String.format("File Modified: %s (New Hash: %s)", file, hash));
+                        updateSuspicionScore(file, "File Modified");
+                    }
+                    if (isPosixFileSystem && !previousState.posixPermissions.equals(currentState.posixPermissions)) {
+                        logger.info(String.format("Permissions Changed: %s", file));
+                        updateSuspicionScore(file, "Permissions Changed");
+                    } else if (!isPosixFileSystem && previousState.isReadOnly != currentState.isReadOnly) {
+                        logger.info(String.format("Read-only status changed: %s", file));
+                        updateSuspicionScore(file, "Read-only Changed");
+                    }
+                    if (previousState.size != currentState.size) {
+                        logger.info(String.format("File Size Changed: %s (Old: %d, New: %d)", file, previousState.size, currentState.size));
+                        updateSuspicionScore(file, "Size Changed");
+                    }
+                    fileStates.put(file, currentState);
+                }
+
+                // Check if score exceeds threshold
+                if (suspicionScores.getOrDefault(file, 0) > 50) {
+                    checkFileForMalware(file, eventType);
+                }
+
+            } catch (IOException e) {
+                logger.severe("Error handling file event for: " + file);
+            }
+        });
+    }
+
+    private boolean isWhitelisted(Path file) {
+        return whitelistedDirectories.stream().anyMatch(dir -> file.startsWith(dir)) ||
+                whitelistedProcesses.contains(file.getFileName().toString().toLowerCase());
+    }
+
+    private boolean isCommonDataFile(Path file) {
+        String fileName = file.getFileName().toString().toLowerCase();
+        return fileName.endsWith(".log") ||
+                fileName.endsWith(".tmp") ||
+                fileName.endsWith(".cache") ||
+                fileName.contains("quotamanager") ||
+                fileName.contains("leveldb") ||
+                fileName.endsWith(".ldb");
+    }
+
+    private void updateSuspicionScore(Path file, String eventType) {
+        int currentScore = suspicionScores.getOrDefault(file, 0);
+        int scoreIncrement = 0;
+
+        switch (eventType) {
+            case "File Created":
+                scoreIncrement = 1;
+                break;
+            case "File Modified":
+                scoreIncrement = 1;
+                break;
+            case "Permissions Changed":
+                scoreIncrement = 2;
+                break;
+            case "Potential Execution Preparation":
+                scoreIncrement = 5;
+                break;
+            case "Potential Sharing Preparation":
+                scoreIncrement = 3;
+                break;
+            default:
+                scoreIncrement = 1;
+        }
+
+        if (isCommonFileType(file)) {
+            scoreIncrement = Math.max(0, scoreIncrement - 1);
+        }
+
+        suspicionScores.put(file, Math.min(currentScore + scoreIncrement, 100));
+    }
+
+    private boolean isCommonFileType(Path file) {
+        String fileName = file.getFileName().toString().toLowerCase();
+        return fileName.endsWith(".txt") ||
+                fileName.endsWith(".log") ||
+                fileName.endsWith(".ini") ||
+                fileName.endsWith(".dat") ||
+                fileName.endsWith(".json");
+    }
+
+    private void checkForSharingOrExecution(Path file, Set<PosixFilePermission> permissions, boolean isReadOnly) {
+        if (isWhitelisted(file) || isCommonDataFile(file)) {
+            return;
+        }
+
+        if (isPosixFileSystem) {
+            if (permissions.contains(PosixFilePermission.OWNER_EXECUTE) ||
+                    permissions.contains(PosixFilePermission.GROUP_EXECUTE) ||
+                    permissions.contains(PosixFilePermission.OTHERS_EXECUTE)) {
+                logger.warning(String.format("Potential Execution Preparation: %s", file));
+                updateSuspicionScore(file, "Potential Execution Preparation");
+            }
+            if (permissions.contains(PosixFilePermission.OTHERS_READ) ||
+                    permissions.contains(PosixFilePermission.OTHERS_WRITE)) {
+                logger.warning(String.format("Potential Sharing Preparation: %s", file));
+                updateSuspicionScore(file, "Potential Sharing Preparation");
+            }
+        } else {
+            try {
+                if (Files.isExecutable(file)) {
+                    logger.warning(String.format("Potential Execution Preparation: %s", file));
+                    updateSuspicionScore(file, "Potential Execution Preparation");
+                }
+                if (!isReadOnly) {
+                    logger.warning(String.format("Potential Sharing Preparation: %s", file));
+                    updateSuspicionScore(file, "Potential Sharing Preparation");
+                }
+            } catch (SecurityException e) {
+                logger.severe("Security exception when checking file permissions: " + file);
+            }
+        }
+
+        if (isRecentlyDownloaded(file) && isPotentiallyExecutable(file)) {
+            logger.warning("Potentially suspicious executable file: " + file);
+            updateSuspicionScore(file, "Potential Execution Preparation");
+        } else if (isRecentlyDownloaded(file) && isPotentiallySensitive(file)) {
+            logger.warning("Potentially sensitive file: " + file);
+            updateSuspicionScore(file, "Potential Sharing Preparation");
+        }
+    }
+
+    private boolean isRecentlyDownloaded(Path file) {
+        try {
+            FileTime creationTime = (FileTime) Files.getAttribute(file, "creationTime");
+            return Duration.between(creationTime.toInstant(), Instant.now()).toHours() < 24;
+        } catch (IOException e) {
+            logger.warning("Error checking file creation time: " + e.getMessage());
+            return false;
+        }
+    }
+
+    private boolean isPotentiallyExecutable(Path file) {
+        String fileName = file.getFileName().toString().toLowerCase();
+        return fileName.endsWith(".exe") || fileName.endsWith(".dll") || fileName.endsWith(".bat") || fileName.endsWith(".ps1");
+    }
+
+    private boolean isPotentiallySensitive(Path file) {
+        String fileName = file.getFileName().toString().toLowerCase();
+        return fileName.contains("password") || fileName.contains("credit") || fileName.contains("ssn");
+    }
+
+    private void checkFileForMalware(Path file, String context) {
+        rateLimiter.acquire(); // This will block until a permit is available
+
+        String fileHash = calculateHash(file);
+        Boolean cachedResult = hashCache.get(fileHash);
+
+        if (cachedResult != null) {
+            if (cachedResult) {
+                logger.severe(String.format("Cached result: Malware detected in file: %s", file));
+                alertSecurityTeam(file, fileHash, context);
+                //deleteFile(file);
+            } else {
+                logger.info(String.format("Cached result: File hash check passed for %s", file));
+            }
+            return;
+        }
+
+        boolean isMalicious = virusTotalClient.checkFileHash(fileHash);
+
+        if (isMalicious) {
+            logger.severe(String.format("WARNING: Potential malware detected: %s", file));
+            alertSecurityTeam(file, fileHash, context);
+            //deleteFile(file);
+        } else {
+            logger.info(String.format("File hash check passed: %s", file));
+        }
+
+        hashCache.put(fileHash, isMalicious);
+    }
+
+    private void alertSecurityTeam(Path file, String fileHash, String context) {
+        // TODO: Implement a real-time alerting system (e.g., email, SMS, or integration with a SIEM system)
+        logger.severe(String.format("ALERT: Potential malware detected. File: %s, Hash: %s, Context: %s", file, fileHash, context));
+    }
+
+    public void startMonitoring() {
+        try {
+            for (Path root : FileSystems.getDefault().getRootDirectories()) {
+                try {
+                    registerAll(root);
+                    logger.info("Successfully registered all directories under root: " + root);
+
+                } catch (AccessDeniedException e) {
+                    logger.warning("Access denied to root directory: " + root);
+                    // Continue with the next root directory
+                }
+            }
+
+            while (true) {
+                WatchKey key = watchService.take();
+                Path dir = keys.get(key);
+                if (dir == null) continue;
+
+                for (WatchEvent<?> event : key.pollEvents()) {
+                    WatchEvent.Kind<?> kind = event.kind();
+                    if (kind == StandardWatchEventKinds.OVERFLOW) {
+                        logger.warning("OVERFLOW: Some events may have been lost or discarded.");
+                        continue;
+                    }
+
+                    @SuppressWarnings("unchecked")
+                    WatchEvent<Path> ev = (WatchEvent<Path>) event;
+                    Path name = ev.context();
+                    Path child = dir.resolve(name);
+
+                    if (kind == StandardWatchEventKinds.ENTRY_CREATE) {
+                        handleFileEvent(child, "File Created");
+                        if (recursive && Files.isDirectory(child, LinkOption.NOFOLLOW_LINKS)) {
+                            registerAll(child);
+                        }
+                    } else if (kind == StandardWatchEventKinds.ENTRY_MODIFY) {
+                        handleFileEvent(child, "File Modified");
+                    } else if (kind == StandardWatchEventKinds.ENTRY_DELETE) {
+                        logger.info(String.format("File Deleted: %s", child));
+                        fileStates.remove(child);
+                        suspicionScores.remove(child);
+                    }
+                }
+
+                if (!key.reset()) {
+                    keys.remove(key);
+                    if (keys.isEmpty()) break;
+                }
+            }
+        } catch (IOException | InterruptedException e) {
+            logger.severe("Error in file monitoring: " + e.getMessage());
+        } finally {
+            executorService.shutdown();
+        }
+    }
+
+    // Utility method to convert byte array to hex string
+    private static String bytesToHex(byte[] hash) {
+        StringBuilder hexString = new StringBuilder(2 * hash.length);
+        for (byte b : hash) {
+            String hex = Integer.toHexString(0xff & b);
+            if (hex.length() == 1) {
+                hexString.append('0');
+            }
+            hexString.append(hex);
+        }
+        return hexString.toString();
+    }
+
+    private void deleteFile(Path file) {
+        try {
+            Files.deleteIfExists(file);
+            logger.info("Successfully deleted malicious file: " + file);
+        } catch (IOException e) {
+            logger.severe("Failed to delete malicious file: " + file + ". Error: " + e.getMessage());
+        }
+    }
+
+
+}
+
+

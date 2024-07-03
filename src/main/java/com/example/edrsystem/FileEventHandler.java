@@ -16,17 +16,19 @@ public class FileEventHandler {
     private final WhitelistManager whitelistManager;
     private final SuspicionScoreManager suspicionScoreManager;
     private final FileHashCalculator fileHashCalculator;
-    private MalwareChecker malwareChecker;
+    private final MalwareChecker malwareChecker;
     private final boolean isPosixFileSystem;
     private static final int FILE_ACCESS_HISTORY_SIZE = 10;
     private static final int SUSPICION_THRESHOLD = 30;
 
-    public FileEventHandler(WhitelistManager whitelistManager, SuspicionScoreManager suspicionScoreManager, FileHashCalculator fileHashCalculator) {
+    public FileEventHandler(WhitelistManager whitelistManager, SuspicionScoreManager suspicionScoreManager,
+                            FileHashCalculator fileHashCalculator, MalwareChecker malwareChecker) {
         this.fileStates = new ConcurrentHashMap<>();
         this.fileAccessHistory = new ConcurrentHashMap<>();
         this.whitelistManager = whitelistManager;
         this.suspicionScoreManager = suspicionScoreManager;
         this.fileHashCalculator = fileHashCalculator;
+        this.malwareChecker = malwareChecker;
         this.isPosixFileSystem = FileSystems.getDefault().supportedFileAttributeViews().contains("posix");
     }
 
@@ -87,7 +89,7 @@ public class FileEventHandler {
     }
 
     private void logFileEvent(Path file, String eventType) {
-        logger.info(String.format("%s: %s (Hash: %s)", eventType, file));
+        logger.info(String.format("%s: %s", eventType, file));
     }
 
     private void updateFileAccessHistory(Path file, String eventType) {

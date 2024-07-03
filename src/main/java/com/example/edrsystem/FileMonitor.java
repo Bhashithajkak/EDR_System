@@ -21,9 +21,8 @@ public class FileMonitor {
     private final FileEventHandler fileEventHandler;
     private final MalwareChecker malwareChecker;
 
-
     private static final int THREAD_POOL_SIZE = 10;
-    private  static  final String PATH="D://Edr testing//";
+    private static final String PATH = "D://Edr testing//";
 
     public FileMonitor() throws IOException, NoSuchAlgorithmException {
         this.watchService = FileSystems.getDefault().newWatchService();
@@ -34,8 +33,8 @@ public class FileMonitor {
         this.whitelistManager = new WhitelistManager();
         this.suspicionScoreManager = new SuspicionScoreManager();
         this.fileHashCalculator = new FileHashCalculator();
-        this.fileEventHandler = new FileEventHandler(whitelistManager, suspicionScoreManager, fileHashCalculator);
         this.malwareChecker = new MalwareChecker();
+        this.fileEventHandler = new FileEventHandler(whitelistManager, suspicionScoreManager, fileHashCalculator, malwareChecker);
 
         LoggerConfig.configureLogger(logger);
     }

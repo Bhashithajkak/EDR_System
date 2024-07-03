@@ -20,8 +20,8 @@ public class EdrApplication extends Application {
 
     public static void main(String[] args) {
         try {
-            FileMonitor monitor = new FileMonitor();
-            monitor.startMonitoring();
+            FileMonitor fileMonitor = new FileMonitor();
+            new Thread(fileMonitor::startMonitoring).start();
         } catch (IOException | NoSuchAlgorithmException e) {
             e.printStackTrace();
         }

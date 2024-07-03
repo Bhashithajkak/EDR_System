@@ -25,7 +25,10 @@ public class FileHashCalculator {
             byte[] hash = md.digest(Files.readAllBytes(file));
             return bytesToHex(hash);
         } catch (IOException e) {
-            logger.severe("Error calculating hash for file: " + file);
+            logger.severe("Error calculating hash for file: " + file + ". Error: " + e.getMessage());
+            return "";
+        } catch (SecurityException e) {
+            logger.severe("Security error calculating hash for file: " + file + ". Error: " + e.getMessage());
             return "";
         }
     }

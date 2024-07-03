@@ -16,6 +16,7 @@ public class FileEventHandler {
     private final WhitelistManager whitelistManager;
     private final SuspicionScoreManager suspicionScoreManager;
     private final FileHashCalculator fileHashCalculator;
+    private MalwareChecker malwareChecker;
     private final boolean isPosixFileSystem;
     private static final int FILE_ACCESS_HISTORY_SIZE = 10;
     private static final int SUSPICION_THRESHOLD = 30;
@@ -38,11 +39,10 @@ public class FileEventHandler {
         try {
             if (!Files.isRegularFile(file)) return;
 
-            String hash = fileHashCalculator.calculateHash(file);
             FileState currentState = getCurrentFileState(file);
             FileState previousState = fileStates.get(file);
 
-            logFileEvent(file, eventType, hash);
+            logFileEvent(file, eventType);
             updateFileAccessHistory(file, eventType);
 
             if (previousState == null) {
@@ -53,8 +53,11 @@ public class FileEventHandler {
             }
 
             if (isSuspiciousBehavior(file)) {
+
                 // Trigger malware check or other actions
                 logger.warning("Suspicious behavior detected for file: " + file);
+                String hash = fileHashCalculator.calculateHash(file);
+                malwareChecker.checkFileForMalware(file,hash);
             }
 
         } catch (IOException e) {
@@ -83,8 +86,8 @@ public class FileEventHandler {
         return new FileState(fileHashCalculator.calculateHash(file), lastModified, size, posixPermissions, isReadOnly);
     }
 
-    private void logFileEvent(Path file, String eventType, String hash) {
-        logger.info(String.format("%s: %s (Hash: %s)", eventType, file, hash));
+    private void logFileEvent(Path file, String eventType) {
+        logger.info(String.format("%s: %s (Hash: %s)", eventType, file));
     }
 
     private void updateFileAccessHistory(Path file, String eventType) {

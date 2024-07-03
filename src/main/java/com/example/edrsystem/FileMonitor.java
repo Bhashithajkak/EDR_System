@@ -23,7 +23,7 @@ public class FileMonitor {
 
 
     private static final int THREAD_POOL_SIZE = 10;
-    private  static  final String PATH="D://";
+    private  static  final String PATH="D://Edr testing//";
 
     public FileMonitor() throws IOException, NoSuchAlgorithmException {
         this.watchService = FileSystems.getDefault().newWatchService();

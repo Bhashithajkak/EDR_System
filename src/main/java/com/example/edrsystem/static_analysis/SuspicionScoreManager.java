@@ -1,4 +1,4 @@
-package com.example.edrsystem;
+package com.example.edrsystem.static_analysis;
 
 import java.nio.file.Path;
 import java.util.Map;

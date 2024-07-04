@@ -13,4 +13,6 @@ module com.example.edrsystem {
 
     opens com.example.edrsystem to javafx.fxml;
     exports com.example.edrsystem;
+    exports com.example.edrsystem.static_analysis;
+    opens com.example.edrsystem.static_analysis to javafx.fxml;
 }

@@ -1,4 +1,4 @@
-package com.example.edrsystem;
+package com.example.edrsystem.static_analysis;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;

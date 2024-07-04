@@ -1,4 +1,4 @@
-package com.example.edrsystem;
+package com.example.edrsystem.static_analysis;
 
 public class FileAccessEvent {
     String eventType;

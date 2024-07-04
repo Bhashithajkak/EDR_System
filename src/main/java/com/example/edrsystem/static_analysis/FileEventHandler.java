@@ -1,4 +1,4 @@
-package com.example.edrsystem;
+package com.example.edrsystem.static_analysis;
 
 import java.io.IOException;
 import java.nio.file.*;
@@ -85,7 +85,7 @@ public class FileEventHandler {
             isReadOnly = !Files.isWritable(file);
         }
 
-        return new FileState(fileHashCalculator.calculateHash(file), lastModified, size, posixPermissions, isReadOnly);
+        return new FileState(fileHashCalculator. calculateHash(file), lastModified, size, posixPermissions, isReadOnly);
     }
 
     private void logFileEvent(Path file, String eventType) {

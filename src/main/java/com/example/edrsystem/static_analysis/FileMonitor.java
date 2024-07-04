@@ -1,4 +1,4 @@
-package com.example.edrsystem;
+package com.example.edrsystem.static_analysis;
 
 import java.io.*;
 import java.nio.file.*;
@@ -20,11 +20,12 @@ public class FileMonitor {
     private final FileHashCalculator fileHashCalculator;
     private final FileEventHandler fileEventHandler;
     private final MalwareChecker malwareChecker;
+    private final String path;
 
     private static final int THREAD_POOL_SIZE = 10;
-    private static final String PATH = "D://Edr testing//";
 
-    public FileMonitor() throws IOException, NoSuchAlgorithmException {
+
+    public FileMonitor(String path) throws IOException, NoSuchAlgorithmException {
         this.watchService = FileSystems.getDefault().newWatchService();
         this.keys = new ConcurrentHashMap<>();
         this.recursive = true;
@@ -34,6 +35,7 @@ public class FileMonitor {
         this.suspicionScoreManager = new SuspicionScoreManager();
         this.fileHashCalculator = new FileHashCalculator();
         this.malwareChecker = new MalwareChecker();
+        this.path = path;
         this.fileEventHandler = new FileEventHandler(whitelistManager, suspicionScoreManager, fileHashCalculator, malwareChecker);
 
         LoggerConfig.configureLogger(logger);
@@ -59,7 +61,7 @@ public class FileMonitor {
 
     public void startMonitoring() {
         try {
-            Path monitoredDirectory = Paths.get(PATH);
+            Path monitoredDirectory = Paths.get(path);
             registerAll(monitoredDirectory);
             logger.info("Successfully registered directory: " + monitoredDirectory);
 
